@@ -1,0 +1,119 @@
+# ============================================================================
+# GTD4Teams Caddy 配置**模板** —— 不是可直接使用的 Caddyfile
+#
+# 由 deploy/lib.sh 的 caddyfile_generate() 生成到 deploy/run/Caddyfile，
+# 再由 `caddy reload` 热加载。生成器做两件事：
+#
+#   1. **把本文件内容原样放进来**（它是 `(gtd) { … }` snippet 的定义），
+#      然后在**后面**追加站点块（这决定了 HTTP/HTTPS 怎么对外暴露）：
+#       · 有手动证书        →  `:80 { import gtd }` + `:443 { tls … ; import gtd }`（两者并存，不跳转）
+#       · 有 GTD_DOMAIN、无证书 →  `<域名> { import gtd }`（走 ACME 自动申请 + 80→443 跳转）
+#       · 两者都没有        →  `:80 { import gtd }`（明文，与引入 HTTPS 之前完全一致）
+#      ⚠️ 站点块必须排在 snippet **之后**：Caddy 的 import 是解析期自上而下解析的，
+#         先 import 后定义会报 `File to import not found: gtd`（实测踩过）。
+#   2. **替换本文件里的占位符**：
+#       · __UPSTREAMS__   上游列表：活跃槽位在前，备用槽位在后，**必须写在同一行**
+#
+# 生成器只替换"非注释行"上的占位符，所以这份说明里的占位符名不会被改动 ——
+# 反过来说，你在这段注释里写什么都不会影响产物，可以放心写。
+#
+# 为什么要用 snippet + import，而不是把整段配置复制两遍
+# ────────────────────────────────────────
+# HTTP 与 HTTPS 要提供**完全相同**的服务（同样的上游、同样的头、同样的日志）。
+# 复制两遍的话，将来改一处（比如加上限流）必然会漏掉另一处，而漏掉的那一侧
+# 往往是"用户实际走的那一侧" —— 这种不一致只在出事那天才会被发现。
+# 用 `(gtd) { … }` 定义一次、两个站点块各 `import gtd`，结构上就只有一份。
+#
+# 为什么 HTTP 与 HTTPS 并存、不做 80→443 跳转
+# ────────────────────────────────────────
+# 跳转会让 `http://127.0.0.1:8080/api/health` 变成 301。
+# 而 release.sh 的连续性探测、smoke.sh 的全部检查、verify-phase0.sh 打的都是这个明文入口 ——
+# 一跳转它们会全红，等于为了"看起来更规范"把整套门禁砸掉。
+# 所以明文口保留（与今天行为一致），HTTPS 作为**并存**的入口。
+# 真要对公网强制 HTTPS，靠 HSTS（只在 :443 站点块里下发）+ 以后加域名，而不是在这里跳转。
+#
+# 为什么上游必须写在同一行
+# ────────────────────────
+# Caddyfile 里换行会终结一条指令，参数表不能跨行。写成
+#     reverse_proxy app-blue:8787
+#         app-green:8787 {
+# 会被解析成"reverse_proxy 指令结束"然后"app-green:8787 是一条新指令"，直接报语法错。
+# 所以两个上游只能用空格分隔挤在同一行。
+#
+# 为什么要"生成 + 热加载"而不是重启 Caddy
+# ────────────────────────────────────────
+# caddy reload 是**平滑重载**：已经在处理的连接由旧配置的进程收尾，新请求按新配置路由。
+# 对比之下 `docker compose up -d caddy` 会销毁重建容器，正在传输的请求全部被切断 ——
+# 那样就谈不上"不断线"了。
+#
+# ⚠️ 生成时最后一步必须**原地覆盖**（cat > 目标），不能用 mv：
+#    容器把 Caddyfile 挂成了单文件，mv 会换 inode，容器内读到的仍是旧文件，
+#    caddy reload 返回 0 但日志只有 "config is unchanged" —— 切流静默失效。
+#    详见 docs/process/09_运维手册与监控告警.md 的 SOP-11（2026-11-15 实测事故）。
+# ============================================================================
+
+(gtd) {
+	encode zstd gzip
+
+	# 请求体上限放宽到 16MB：截图 OCR 会把图片以 data URL 内联提交。
+	# 后端自身还有一道 8MB 的校验（GTD_MAX_BODY_BYTES），这里只是不提前把它掐掉。
+	request_body {
+		max_size 16MB
+	}
+
+	# ── 第 0 期配置止血：已撤销（2026-11-15）────────────────────────────────
+	# 这里曾经有两条规则，把下面两个端点在**代码修复前**挡在公网入口外：
+	#   GET  /api/export       任意已登录账号可导出整库（口令散列 + LLM 密钥明文 + 他人私有事项）
+	#   POST /api/llm/config   无角色门槛且 baseUrl 无校验 → SSRF，且服务端会把真实密钥外带
+	#
+	# 现已删除，因为代码侧已经把嘴闭上了：
+	#   · /api/export        由 `export_visible` 收口（只导出调用者可见的数据）
+	#   · POST /api/llm/config 由 `h_llm_config_set` 收口（系统管理员才可写，ADMIN_ONLY）
+	# 撤销的直接原因：这两条规则造成了**死循环引导** —— GET /api/llm/models 引导用户去
+	# "AI 设置"填密钥，而那个 POST 正被这里 404，用户永远填不进去。
+	#
+	# ⚠️ 保留这段注释是刻意的：将来若代码侧的双门被改动，需要知道这里曾经有过一道壳级拦截。
+	# 复核脚本：deploy/verify-phase0.sh（判据已同步改为"匿名 = 401"）。
+	# 另注：槽位端口（127.0.0.1:8788/8789）本来就能绕开 Caddy 直连，所以壳级拦截从来不是安全边界。
+
+	# 上游顺序即优先级：lb_policy first 会让流量全部走**第一个可用**的上游。
+	# 因此发布脚本把"当前活跃槽位"写在前面，切换 = 重写这个顺序 + 热加载。
+	# 第二个上游是兜底：引流窗口内新槽位若突然挂掉，Caddy 会自动退回到旧槽位。
+	reverse_proxy __UPSTREAMS__ {
+		lb_policy first
+
+		# 主动健康检查：每 3 秒探一次 /api/health，连续失败即摘除该上游。
+		# 没有这个配置时 Caddy 用的是被动检查，列在首位的死上游会先吃掉一批失败请求。
+		health_uri /api/health
+		health_interval 3s
+		health_timeout 2s
+
+		# 覆盖（而不是追加）X-Forwarded-For。
+		# 这一点是安全相关的：Caddy 默认**追加**到客户端传来的 XFF 后面，
+		# 而客户端可以自己伪造一个 XFF。后端取的是第一个值（见 pyapp/httpd.py 的 _client_ip），
+		# 若走追加语义，伪造值恰好排在真实 IP 前面，登录限流键就被攻击者按需更换了。
+		# 改写为"直接取本次 TCP 连接的来源地址"，伪造的头部在这里被丢弃。
+		header_up X-Forwarded-For {http.request.remote.host}
+		header_up X-Forwarded-Proto {http.request.scheme}
+
+		# AI 流式响应（边生成边推送）必须关闭缓冲，
+		# 否则 Caddy 会攒够一批才转发，前端看到的是"卡住很久然后一次性出现"。
+		flush_interval -1
+	}
+
+	header {
+		# 注意：HSTS **不在这里**。它只在 HTTPS 站点块里下发（由生成器写）。
+		# 原因：在明文 HTTP 上发 HSTS 没有意义，而且浏览器会把它记进 HSTS 列表，
+		# 之后再想回退到 HTTP 就回不去了。
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+	}
+}

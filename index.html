@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>团队 GTD 工作台 · 运维与项目一体化协作</title>
+<meta name="description" content="面向小型 IT 运维团队的多团队 GTD 工作台：团队共享空间负责派活、巡检、值班与资源，个人空间以 GTD 五步跟进本人工作。" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='5' y='5' width='22' height='22' rx='6' fill='none' stroke='%2314867a' stroke-width='3'/><circle cx='16' cy='16' r='4' fill='%2314867a'/></svg>" />
+<link rel="stylesheet" href="./css/app.css?v=20261118b" />
+</head>
+<body>
+
+<!-- 认证视图 -->
+<div id="auth-root" class="auth-root" hidden></div>
+
+<!-- 应用外壳 -->
+<div id="app-root" class="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">团队 GTD 工作台</span>
+    </div>
+
+    <!-- 空间切换：个人空间 / 团队空间 -->
+    <div id="space-tabs" class="space-tabs-slot"></div>
+
+    <!-- 当前团队选择器 -->
+    <div id="team-switch" class="team-switch-slot"></div>
+
+    <div class="capture">
+      <input id="quick-capture" class="capture-input" type="text" autocomplete="off"
+             placeholder="收集一个想法、任务或承诺… 回车快速存入收集箱" />
+      <button id="quick-submit" class="btn btn-primary">收集</button>
+    </div>
+
+    <div class="topbar-right">
+      <div class="search-box">
+        <input id="global-search" type="search" autocomplete="off" placeholder="搜索事项 / 项目 / 资源" />
+      </div>
+      <div class="user-slot">
+        <button id="user-btn" class="user-btn" type="button" title="账号">
+          <span id="user-avatar" class="avatar"></span>
+          <span class="user-meta">
+            <span id="user-name" class="user-name"></span>
+            <span id="user-email" class="user-email"></span>
+          </span>
+        </button>
+        <div id="user-panel" class="user-panel" hidden></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav id="sidebar" class="sidebar"></nav>
+    <main id="main" class="main" tabindex="-1"></main>
+  </div>
+</div>
+
+<!-- 浮层容器 -->
+<div id="drawer-root" class="drawer-root" hidden></div>
+<div id="modal-root" class="modal-root" hidden></div>
+<div id="toast-root" class="toast-root"></div>
+
+<script type="module" src="./js/app.js?v=20261118b"></script>
+</body>
+</html>

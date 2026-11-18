@@ -1,0 +1,54 @@
+# 构建上下文瘦身 + 阻止本机数据进镜像。
+#
+# Dockerfile 用的是白名单式 COPY（只拷运行期真正需要的四个目录 + 入口页），
+# 这里再排一遍属于双保险：上下文越小构建越快，
+# 也彻底杜绝"本机数据库/笔记被顺手拷进镜像"的可能。
+
+# ---- 本机运行时数据：含账号口令散列，绝不能进镜像 ----
+data/
+*.db
+*.db-wal
+*.db-shm
+backup*.json
+
+# ---- 测试与项目笔记 ----
+.smoke/
+tests/
+docs/
+.workbuddy/
+.wbapp_*.genie
+
+# ---- 部署脚本与文档：部署机上有源码就够了 ----
+deploy/
+README.md
+.gitignore
+
+# ---- 证书与私钥：绝不能进镜像 ----
+# （`deploy/` 已整体排除，这里显式再写一条：私钥进镜像等于随镜像分发，
+#   而镜像会被推到仓库/被别的机器拉走。让人一眼看见"这里防的是私钥"。）
+deploy/run/certs/
+*.crt
+*.key
+*.pem
+
+# ---- 密钥与环境配置 ----
+.env
+.env.*
+
+# ---- Python 字节码与缓存 ----
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ---- 版本控制与编辑器 ----
+.git/
+.gitattributes
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 容器化产物自身 ----
+Dockerfile
+.dockerignore
+docker-compose*.yml

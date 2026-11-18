@@ -1,0 +1,8 @@
+/**
+ * Bundled by jsDelivr using Rollup v4.62.2 and esbuild v0.28.1.
+ * Original file: /npm/nth-check@3.0.1/dist/index.js
+ *
+ * Do NOT use SRI with dynamically generated files! More information: https://www.jsdelivr.com/using-sri-with-dynamic-files
+ */
+import*as a from"./dep-boolbase_2.0.0-+esm.js";function l(t){const e=t[0],n=t[1]-1;if(n<0&&e<=0)return a.falseFunc;if(e===-1)return r=>r<=n;if(e===0)return r=>r===n;if(e===1)return n<0?a.trueFunc:r=>r>=n;const c=Math.abs(e),s=(n%c+c)%c;return e>1?r=>r>=n&&r%c===s:r=>r<=n&&r%c===s}function b(t){const e=t[0];let n=t[1]-1,c=0;if(e<0){const s=-e,r=(n%s+s)%s;return()=>{const i=r+s*c++;return i>n?null:i}}return e===0?n<0?()=>null:()=>c++===0?n:null:(n<0&&(n+=e*Math.ceil(-n/e)),()=>e*c+++n)}const A=new Set([9,10,12,13,32]),d=48,g=57;function o(t){switch(t=t.trim().toLowerCase(),t){case"even":return[2,0];case"odd":return[2,1]}let e=0,n=0,c=r(),s=i();if(e<t.length&&t.charAt(e)==="n"&&(e++,n=c*(s??1),h(),e<t.length?(c=r(),h(),s=i()):c=s=0),s===null||e<t.length)throw new Error(`n-th rule couldn't be parsed ('${t}')`);return[n,c*s];function r(){switch(t.charAt(e)){case"-":return e++,-1;case"+":{e++;break}}return 1}function i(){const w=e;let u=0;for(;e<t.length&&t.charCodeAt(e)>=d&&t.charCodeAt(e)<=g;)u=u*10+(t.charCodeAt(e)-d),e++;return e===w?null:u}function h(){for(;e<t.length&&A.has(t.charCodeAt(e));)e++}}function C(t){return l(o(t))}function f(t){return b(o(t))}export{l as compile,C as default,b as generate,o as parse,f as sequence};
+//# sourceMappingURL=/sm/d488a891a95847d3c1f812905c3a17768632a86f8a1a8ffa21074abc58565282.map

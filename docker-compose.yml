@@ -1,0 +1,191 @@
+# GTD4Teams 部署编排（Docker Compose）—— 单服务器 · 双槽位 · 零停机发布
+#
+# 拓扑
+# ────
+#                      ┌──────────────┐
+#   公网 80/443 ──────► │    caddy     │  唯一对外入口，也是切流开关
+#                      └──────┬───────┘
+#                             │ 同一个数据卷，同一份 SQLite 库
+#                  ┌──────────┴──────────┐
+#            app-blue                app-green
+#          (127.0.0.1:8788)        (127.0.0.1:8789)
+#            平时只跑其中一个；发布时先把另一个起起来，健康后再切流
+#
+# 为什么两个槽位能共用一份 SQLite 库
+# ──────────────────────────────────
+# pyapp/db.py 的连接固定开启 WAL + busy_timeout=15s：读不阻塞写，写与写之间排队等待
+# 而不是立刻报 database is locked。因此切换期间新旧两版同时在跑也不会损坏数据。
+# 代价是"新旧两版的表结构必须兼容"——见 docs/零停机发布方案.md 的兼容纪律一节。
+#
+# 常用命令（发布请用脚本，别手敲 compose）
+# ──────────────────────────────────
+#   sudo bash deploy/install.sh              # 首次部署
+#   sudo bash deploy/release.sh              # 发布新版（零停机）
+#   sudo bash deploy/release.sh --status     # 看当前状态
+#   sudo bash deploy/rollback.sh             # 回滚到上一版
+#   sudo bash deploy/backup.sh               # 备份
+#   docker compose logs -f app-blue          # 看某个槽位的日志
+#
+# ⚠️ 不要直接执行 `docker compose up -d`：那会把**两个槽位同时拉起**。
+#    虽然共用 WAL 库不会损坏数据，但请让脚本维护"同一时刻只有一个活跃槽位"这个不变量。
+#
+# 配置一律走同目录的 .env（见 deploy/env.example），不要把密钥写进这个文件。
+
+name: gtd4teams
+
+# ---------------------------------------------------------------- 槽位公共定义
+# YAML 锚点复用：两个槽位除了名字、端口、容器名之外完全一致。
+# 一致的唯一理由也是"可替换"的唯一保证 —— 任何一处差异都会让切换行为不可预期。
+x-app: &app
+  # 镜像标签由发布脚本通过环境变量注入（GTD_IMAGE=gtd4teams:<构建标识>）。
+  # 不写死 `latest`：回滚时需要能精确指回上一个已知可用的标签。
+  image: ${GTD_IMAGE:-gtd4teams:dev}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+  # 自愈：进程崩溃自动拉起。宿主机重启后也会自己起来。
+  # 用 unless-stopped 而不是 always —— 发布期间我们主动 stop 掉的旧槽位不该被唤醒。
+  restart: unless-stopped
+
+  environment:
+    # ---- 监听与数据 ----
+    # 容器内固定 8787、数据固定 /data：槽位之间的差异**只在宿主机端口**，
+    # 让"两个槽位等价"这件事在配置上也成立。
+    GTD_HOST: "0.0.0.0"
+    GTD_PORT: "8787"
+    GTD_DATA_DIR: "/data"
+
+    # ---- 注册策略（公网部署必看）----
+    #   1. 完全私有：GTD_ALLOW_SIGNUP=0，账号由运维开通
+    #      docker compose exec app-blue python server.py --set-password 某人@example.com
+    #   2. 半开放：  保留 1，同时设 GTD_SIGNUP_CODE，注册时必须填对口令
+    #   3. 全开放：  默认（仅建议内网或临时演示）
+    GTD_ALLOW_SIGNUP: "${GTD_ALLOW_SIGNUP:-1}"
+    GTD_SIGNUP_CODE: "${GTD_SIGNUP_CODE:-}"
+
+    # ---- 反向代理信任 ----
+    # 这里默认 1，与上一版（默认 0）相反，前提有两个，缺一不可：
+    #   · 两个槽位的端口都只绑 127.0.0.1（见下面 ports），公网进不来；
+    #   · 所有流量都经过 Caddy，而 Caddy 会把 X-Forwarded-For **覆盖**为真实客户端 IP
+    #     （见 deploy/Caddyfile.template 的 header_up），不是追加，因此伪造的 XFF 无效。
+    # 这两条同时成立时，信任 XFF 才能让登录限流按真实 IP 计数；
+    # 少了任何一条，客户端就能靠伪造 XFF 换掉限流键，登录爆破等于不限速。
+    GTD_TRUST_PROXY: "${GTD_TRUST_PROXY:-1}"
+
+    # ---- AI 能力（可选，不填则相关接口返回 LLM_NOT_CONFIGURED）----
+    GTD_LLM_API_KEY: "${GTD_LLM_API_KEY:-}"
+    GTD_LLM_BASE_URL: "${GTD_LLM_BASE_URL:-}"
+    GTD_LLM_MODEL: "${GTD_LLM_MODEL:-}"
+
+    # ---- 实例管理员白名单（安全相关）----
+    # 只有名单内的邮箱才能经 HTTP 修改 AI 配置（POST /api/llm/config）。
+    # 留空 = 无人可改，只能走上面的 GTD_LLM_* 环境变量 —— 这是有意的安全默认。
+    # ⚠️ 这里传空串是**正确**的（与 GTD_BUILD 那一项相反）：后端的默认值本来就是"没有管理员"，
+    #    不存在"用空值覆盖掉镜像里烘焙的默认值"的问题。
+    GTD_ADMIN_EMAILS: "${GTD_ADMIN_EMAILS:-}"
+
+    # ---- 构建标识：**不要在这里设置 GTD_BUILD** ----
+    # 它由 Dockerfile 的 ARG GTD_BUILD 在构建时烘焙进镜像的 ENV（见 Dockerfile:46-47），
+    # 运行时由 /api/health 回传，发布脚本据此核对"新槽位跑的就是我这次构建的那一版"。
+    #
+    # 曾经这里写过 `GTD_BUILD: "${GTD_BUILD:-}"`，本意是留个排障用的覆盖口，
+    # 实际效果却是：.env 里没有这个变量 → 展开成空字符串 → **把镜像里的值覆盖成空**，
+    # 后端 `(os.environ.get('GTD_BUILD') or 'dev')` 于是回传 "dev"。
+    # 结果就是每次发布的构建标识核对都会失败（实测：期望 20261113-164750、实际 dev），
+    # 或者更糟 —— 有人为了"修好它"把核对放宽，那这道防线就名存实亡了。
+    # compose 的 environment 无法"只在非空时注入"，所以正确做法是这里**不写**这一项。
+    #
+    # 确实需要人为标记时：docker run -e GTD_BUILD=标记 ... ，或直接改构建参数重打镜像。
+
+  volumes:
+    - gtd-data:/data
+    # 证书目录（读写）：后端收到的"上传证书"要落到这里，看门狗/发布脚本再从宿主机读到并热加载。
+    # ⚠️ 挂**目录**，不要挂单文件 —— 单文件 bind mount 绑的是 inode，
+    #    文件被替换（mv / 重写）后容器里还是旧的那一份，Caddy 就这样静默用了三天旧配置
+    #    （见 09 手册 SOP-11）。目录挂载能看到新建/替换的文件，没有这个问题。
+    # 属主必须是容器运行用户（uid 10001），否则 rootfs 只读 + 非 root 的后端写不进来：
+    #    sudo chown -R 10001:10001 deploy/run/certs
+    - ./deploy/run/certs:/certs
+
+  # ---- 运行约束：按最小权限收紧 ----
+  read_only: true              # 根文件系统只读，唯一可写处是 /data 与下面的 tmpfs
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true   # 禁止通过 setuid 之类的途径提权
+  cap_drop:
+    - ALL                      # 监听 8787（非特权端口），一个 capability 都不需要
+
+  # 健康检查直接用 Python 标准库发请求，不装 curl —— 少一层依赖，也少一个攻击面。
+  # 这个状态同时被三处消费：docker 的 health 显示、发布脚本的等待条件、
+  # watchdog 的自愈判据。
+  healthcheck:
+    test: ["CMD", "python", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/api/health',timeout=3)"]
+    interval: 15s
+    timeout: 5s
+    start_period: 10s
+    retries: 3
+
+  # 业务日志与访问日志都在 SQLite 里，这里只兜底进程自身的输出；
+  # 限制大小是防止长期运行把宿主机磁盘写满。
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ------------------------------------------------------------- 蓝槽位
+  app-blue:
+    <<: *app
+    container_name: gtd4teams-blue
+    ports:
+      # 只绑回环：这个端口是给宿主机上的健康检查与冒烟测试用的，不是对外入口。
+      # 对外入口只有一个，就是 caddy 的 80/443。
+      - "127.0.0.1:${GTD_BLUE_PORT:-8788}:8787"
+
+  # ------------------------------------------------------------- 绿槽位
+  app-green:
+    <<: *app
+    container_name: gtd4teams-green
+    ports:
+      - "127.0.0.1:${GTD_GREEN_PORT:-8789}:8787"
+
+  # ------------------------------------------------------------- 唯一公网入口
+  # Caddy 常驻（不再用 profile 按需启用），因为"切流"这件事必须由它来做：
+  # 它的上游列表由发布脚本生成并热加载，切换期间不重启容器、不断连接。
+  caddy:
+    image: caddy:2-alpine
+    container_name: gtd4teams-caddy
+    restart: unless-stopped
+    ports:
+      - "${GTD_HTTP_PORT:-80}:80"
+      - "${GTD_HTTPS_PORT:-443}:443"
+    environment:
+      # 空 = 没有域名，按明文 HTTP 提供（此时登录口令明文过网，见文档的 HTTPS 一节）。
+      # 非空 = 例如 gtd.example.com，Caddy 自动申请并续期证书。
+      GTD_DOMAIN: "${GTD_DOMAIN:-}"
+    volumes:
+      # ⚠️ 这个文件由 deploy/lib.sh 的 caddyfile_generate() 生成，**不要手工编辑**：
+      #    下次发布会整份覆盖。要改结构请改 deploy/Caddyfile.template。
+      #    另外它必须**先存在**再 up，否则 docker 会在这个路径建出一个同名目录，
+      #    Caddy 会以一个莫名其妙的挂载错误启动失败。
+      - ./deploy/run/Caddyfile:/etc/caddy/Caddyfile:ro
+      # 证书目录（只读）：Caddy 只需要读证书与私钥，不需要写回。
+      # ⚠️ 同样必须是**目录**挂载（理由见上面 app 的说明与 09 手册 SOP-11）。
+      #    没有证书时这个目录也可以空着 —— 生成器只有检测到 tls.crt+tls.key 才会写 :443 站点块，
+      #    所以 Caddy 不会因为"有挂载没证书"而启动失败。
+      - ./deploy/run/certs:/certs:ro
+      - caddy-data:/data          # 证书持久化，重启不会重新申请
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gtd-data:      # 业务数据（SQLite 库文件）—— 两个槽位共享，是唯一的真相来源
+  caddy-data:    # TLS 证书
+  caddy-config:
